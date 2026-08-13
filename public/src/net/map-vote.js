@@ -1,7 +1,8 @@
 export const PVP_MAP_OPTIONS = Object.freeze([
-  Object.freeze({ id: 'facility', name: 'BLACKSITE', thumbnail: './blacksite.png' }),
-  Object.freeze({ id: 'playland', name: 'PLAYLAND', thumbnail: './playland.png' }),
-  Object.freeze({ id: 'ruins', name: 'RUINS', thumbnail: './RUINS.png' }),
+  Object.freeze({ id: 'facility', name: 'BLACKSITE', thumbnail: './asset/ui/blacksite.png' }),
+  Object.freeze({ id: 'playland', name: 'PLAYLAND', thumbnail: './asset/ui/playland.png' }),
+  Object.freeze({ id: 'ruins', name: 'RUINS', thumbnail: './asset/ui/RUINS.png' }),
+  Object.freeze({ id: 'space_president', name: 'SPACE-PRESIDENT', thumbnail: './asset/ui/SPACE-PRESIDENT.png' }),
 ]);
 
 const OPTION_IDS = new Set(PVP_MAP_OPTIONS.map((option) => option.id));
