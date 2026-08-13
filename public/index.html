@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<title>Pixel Ops</title>
+<link rel="icon" href="data:," />
+<link rel="preload" href="./assets/ui/fonts/ArkPixel-10px-Monospaced-zh_cn.woff2"
+  as="font" type="font/woff2" crossorigin />
+<link rel="stylesheet" href="./src/ui/style.css" />
+<script type="module">
+  // window.Proxy = undefined;
+  // Object.freeze(Object.prototype);
+  // Object.freeze(Function.prototype);
+  // Object.freeze(Array.prototype);
+  // Object.freeze(String.prototype);
+  // Object.freeze(Number.prototype);
+</script>
+</head>
+<body>
+  <div id="stage">
+    <canvas id="scene"></canvas>
+    <canvas id="hud"></canvas>
+  </div>
+  <div id="chat-layer" aria-live="polite">
+    <div id="chat-log"></div>
+    <div id="chat-entry">
+      <span>ALL</span>
+      <input id="chat-input" type="text" maxlength="80" autocomplete="off"
+        spellcheck="false" aria-label="PVP room chat" />
+    </div>
+  </div>
+  <div id="loadout-layer" hidden></div>
+  <div id="map-vote-layer" hidden></div>
+  <div id="system-dialog" class="system-dialog" hidden>
+    <div class="system-dialog-panel" role="alertdialog" aria-modal="true"
+      aria-labelledby="system-dialog-title" aria-describedby="system-dialog-message">
+      <h2 id="system-dialog-title"></h2>
+      <p id="system-dialog-message"></p>
+      <button id="system-dialog-confirm" type="button">CONFIRM</button>
+    </div>
+  </div>
+  <div id="boot"><span>LOADING</span></div>
+
+  <!-- <script type="importmap">
+  {
+    "imports": {
+      "three": "./vendor/three.module.js",
+      "three/addons/loaders/GLTFLoader.js": "./node_modules/three/examples/jsm/loaders/GLTFLoader.js"
+    }
+  }
+  </script> -->
+  <script type="module">
+    import('./src/main.js').catch((err) => {
+      alert(err);
+      const b = document.getElementById('boot');
+      b.classList.add('error');
+      b.textContent = 'FAILED TO START: ' + (err && err.message ? err.message : err);
+      console.error(err);
+    });
+  </script>
+</body>
+</html>

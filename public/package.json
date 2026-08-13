@@ -1,0 +1,13 @@
+{
+  "name": "PublicAsset",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {},
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}

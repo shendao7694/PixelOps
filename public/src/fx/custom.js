@@ -1,0 +1,80 @@
+//Quick custom pve config entry file
+
+const customConfig = {
+    hp : 100,
+    max_ticket : 100,
+    deadTimer : 6,
+    isCustom : false,
+    oringleSniperBuild : (V) => {
+        return {
+            id: 'sniper',
+            name: 'LONGBOW M7',
+            cls: 'BOLT-ACTION',
+            auto: false,
+            damage: 92,
+            rpm: 48,
+            mag: 5,
+            reserve: 30,
+            pellets: 1,
+            spreadHip: 0.085,
+            spreadAds: 0.0006,
+            spreadMove: 0.04,
+            recoilV: 4.2,
+            aimKickUp: 0.052,
+            recoilH: 0.5,
+            kick: 3.0,
+            adsTime: 0.32,
+            adsFov: 0.36,
+            scope: true,
+            boltTime: 0.85,
+            reloadTime: 3.1,
+            reloadEmptyTime: 3.4,
+            range: 140,
+            minDamage: 0.9,
+            moveMult: 0.88,
+            sound: { kind: 'sniper', body: 90, bright: 4200, dur: 0.36, gain: 0.85, tail: true },
+            hipPos: V(0.145, -0.14, -0.46),
+            hipRot: V(0.015, -0.05, 0.02),
+            sightHeight: 0.150,
+            adsZ: -0.32,
+        }
+    },
+    sniperConfigBuild : (V) => {
+        return (!customConfig.isCustom) ? customConfig.oringleSniperBuild(V) : {
+            id: 'sniper',
+            name: 'LONGBOW M7',
+            cls: 'BOLT-ACTION',
+            auto: true,
+            damage: 92,
+            rpm: 500,
+            mag: 999,
+            reserve: 9999,
+            pellets: 120,
+            spreadHip: 1,
+            spreadAds: 0.0006,
+            spreadMove: 0.04,
+            recoilV: 0,
+            aimKickUp: 0,
+            recoilH: 0,
+            kick: 10.0,
+            adsTime: 0.32,
+            adsFov: 0.36,
+            scope: true,
+            boltTime: 0.1,
+            reloadTime: 0.1,
+            reloadEmptyTime: 0.1,
+            range: 140,
+            minDamage: 0.9,
+            moveMult: 2.88,
+            sound: { kind: 'sniper', body: 90, bright: 4200, dur: 0.36, gain: 0.85, tail: true },
+            hipPos: V(0.145, -0.14, -0.46),
+            hipRot: V(0.015, -0.05, 0.02),
+            sightHeight: 0.150,
+            adsZ: -0.32,
+        }
+    }
+}
+
+export {
+    customConfig
+}
