@@ -1,0 +1,19 @@
+// Development-only entry point used by start-local-pvp.bat. Environment
+// switches are installed before serve.mjs imports authentication/server code,
+// so the public `npm start` path can never accidentally inherit the bypass.
+if (process.env.NODE_ENV === 'production') {
+  throw new Error('The local PVP authentication bypass cannot run in production.');
+}
+
+process.env.NODE_ENV = 'development';
+process.env.PVP_TEST_AUTH_BYPASS = '1';
+process.env.PVP_DISABLE_BAN_PERSISTENCE = '1';
+process.env.HOST ||= '127.0.0.1';
+process.env.PORT ||= '18123';
+global.istest = true;
+
+console.log('');
+console.log('  Guest Player Mode');
+console.log('');
+
+await import('../serve.mjs');

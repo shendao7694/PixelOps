@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PIXEL OPS - autoplay harness</title>
+<link rel="stylesheet" href="../src/ui/style.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="scene"></canvas>
+    <canvas id="hud"></canvas>
+  </div>
+  <div id="loadout-layer" hidden></div>
+  <div id="boot"><span>LOADING</span></div>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "../vendor/three.module.js",
+      "three/addons/loaders/GLTFLoader.js": "../node_modules/three/examples/jsm/loaders/GLTFLoader.js"
+    }
+  }
+  </script>
+  <script type="module">
+    // Development harness: drives the game without pointer lock so headless
+    // Chrome can screenshot real gameplay. Not part of the shipped game.
+    import { buildWeapon, WEAPON_DEFS } from '../src/game/weapons.js';
+    import {
+      JUGGERNAUT_MAX_ARMOR,
+      JUGGERNAUT_MAX_HEALTH,
+    } from '../src/game/juggernaut.js';
+    import('../src/main.js').then(async () => {
+      const params = new URLSearchParams(location.search);
+      const g = window.__game;
+      const scenario = params.get('s') || 'fight';
+      const selectedWeapon = WEAPON_DEFS[params.get('weapon')]
+        ? params.get('weapon')
+        : null;
+      await new Promise((r) => setTimeout(r, 60));
+      g.input.requestLock = () => {};        // harness never needs pointer lock
+      // ?map=playland swaps the arena before the match boots
+      if (params.get('map')) g.applyMap(params.get('map'));
+      if (params.get('title') === '1') { window.__autoplayReady = true; return; }
+      g.startMatch();
+      if (scenario === 'loadout') {
+        if (params.get('mode') === 'pvp') {
+          // Visual-only PVP header preview. Keep the harness simulation local
+          // so it does not require a live authoritative snapshot.
+          g.loadoutScreen.show({
+            loadout: g.loadout,
+            gameType: 'pvp',
+            mapName: 'BLACKSITE',
+            roomNumber: Number(params.get('room') || 3),
+            initial: true,
+          });
+        }
+        g.input.locked = false;
+      } else {
+        g.deployLoadout();
+        if (selectedWeapon) g.viewModel.equip(selectedWeapon, true);
+        g.mode = 'playing';
+        g.input.enabled = true;
+        g.input.locked = true;               // pretend the mouse is captured
+      }
+      const yawRate = Number(params.get('yaw') || 0);
+      const freezeHolster = params.get('holster') === '1';
+
+      if (scenario !== 'death') g.player.takeDamage = () => false;   // god mode for shots
+
+      let t = 0;
+      const origStep = g.step.bind(g);
+      let rapidKills = 0;
+      let rapidBots = [];
+      let missileBots = [];
+      let frozenCasAge = null;
+      let frozenAirdropAge = null;
+      let harnessAirdropTarget = { x: 0, y: 0, z: 0 };
+      let juggernautBot = null;
+      let stanceBot = null;
+      let impactFxAt = -99;
+      if (scenario === 'hudicons') {
+        g.loadout.streaks = ['uav', 'strike', 'sentry'];
+        g.uav.charges = 1;
+        g.strikeCharges = 0;
+        g.sentryCharges = 2;
+        g.hud.killfeed.length = 0;
+        g.hud.pushKill({
+          killer: 'ALPHA-1',
+          victim: 'KILO-2',
+          killerTeam: 'blue',
+          victimTeam: 'red',
+          weapon: 'sniper',
+          headshot: true,
+          highlight: true,
+        });
+      }
+      if (scenario === 'streakwheel') {
+        g.loadout.streaks = ['uav', 'strike', 'sentry'];
+        g.uav.charges = 1;
+        g.strikeCharges = params.get('unavailable') === '1' ? 0 : 1;
+        g.sentryCharges = 1;
+        Object.assign(g.streakWheel, {
+          tracking: true,
+          hold: 1,
+          open: true,
+          cursorX: 0.82,
+          cursorY: 0.47,
+          selected: 1,
+        });
+      }
+      if (scenario === 'manualwheel') {
+        g.loadout.streaks = ['uav', 'strike', 'sentry'];
+        g.uav.charges = 1;
+        g.strikeCharges = 1;
+        g.sentryCharges = 1;
+      }
+      if (scenario === 'huddeath') {
+        const killer = g.bots.find((bot) => bot.team !== g.player.team) || null;
+        g.player.die(killer?.position || null, killer);
+        g.onPlayerKilled(killer, WEAPON_DEFS.desert_eagle);
+        g.respawnTimer = 99;
+      }
+      if (scenario === 'castablet') {
+        g.casCharges = 1;
+        g.casTargeting = {
+          phase: 'end',
+          cursor: { x: 52, z: 4 },
+          start: { x: -52, z: 4 },
+          end: { x: 52, z: 4 },
+          bounds: { ...g.level.bounds },
+          width: 26,
+          px: 0,
+          pz: 26,
+          yaw: 0,
+          enemies: g.bots.filter((b) => b.team === 'red').slice(0, 5)
+            .map((b) => ({ x: b.position.x, z: b.position.z })),
+          scanT: 99,
+          entering: freezeHolster,
+          holsterRemaining: freezeHolster ? 0.12 : 0,
+        };
+        if (freezeHolster) g.viewModel.holsterCurrent();
+      }
+      if (scenario === 'uavradio') {
+        g.uav.charges = 1;
+        g.beginStreakCall('uav');
+      }
+      if (scenario === 'jugradio') {
+        g.juggernautCharges = 1;
+        g.loadout.streaks = ['uav', 'strike', 'juggernaut'];
+        g.beginStreakCall('juggernaut');
+      }
+      if (scenario === 'uavdrone') {
+        for (const bot of g.bots) {
+          bot.alive = false;
+          bot.respawnTimer = 999;
+          bot.rig.root.visible = false;
+        }
+        g.uav.time = 20;
+        const droneTeam = params.get('enemy') === '1' ? 'red' : g.player.team;
+        g.spawnLocalUavDrone(droneTeam, 'autoplay');
+      }
+      if (scenario === 'missiletablet') {
+        g.strikeCharges = 1;
+        g.beginStreakCall('strike');
+      }
+      if (scenario === 'missilecam') {
+        missileBots = g.bots.filter((b) => b.team !== g.player.team).slice(0, 3);
+        for (const bot of g.bots) {
+          if (missileBots.includes(bot)) continue;
+          bot.alive = false;
+          bot.respawnTimer = 999;
+          bot.rig.root.visible = false;
+        }
+        const positions = [[-7, 36], [0, 32], [7, 40]];
+        missileBots.forEach((bot, i) => {
+          bot.spawn(bot.position.set(positions[i][0], 0, positions[i][1]));
+          bot.velocity.set(0, 0, 0);
+          bot.target = null;
+        });
+        g.beginTvMissile({ authoritative: true });
+        g.tvMissileCam = 1;
+      }
+      if (scenario === 'cas') {
+        // By default show the first aircraft pulling out while the second one
+        // begins its pass, making the two-second spacing visible in one frame.
+        frozenCasAge = Number(params.get('age') || 4.55);
+        g.spawnCasRun({
+          id: 'autoplay-cas',
+          ownerId: 'player',
+          team: 'blue',
+          start: { x: -52, z: 0 },
+          end: { x: 52, z: 0 },
+          seed: 0xdecafbad,
+          age: frozenCasAge,
+          pvp: true,
+        });
+      }
+      if (scenario === 'airdrop' || scenario === 'airdropimpact') {
+        for (const bot of g.bots) {
+          bot.alive = false;
+          bot.respawnTimer = 999;
+          bot.rig.root.visible = false;
+        }
+        frozenAirdropAge = Number(params.get('age')
+          || (scenario === 'airdropimpact' ? 4.72 : 3.15));
+        harnessAirdropTarget = {
+          x: Number(params.get('dropx') || 0),
+          y: 0,
+          z: Number(params.get('dropz') || 0),
+        };
+        g.spawnJuggernautAirdrop({
+          id: 'autoplay-airdrop',
+          ownerId: 'player',
+          team: 'blue',
+          target: harnessAirdropTarget,
+          yaw: Number(params.get('dropyaw') || 0),
+          age: frozenAirdropAge,
+          pvp: true,
+        });
+      }
+      if (scenario === 'juggernaut') {
+        const showcaseTeam = params.get('team') === 'red' ? 'red' : 'blue';
+        juggernautBot = g.bots.find((bot) => bot.team === showcaseTeam) || g.bots[0];
+        g.buildEnemyHudTargets = () => [];
+        if (params.get('clean') === '1') {
+          document.getElementById('hud').style.display = 'none';
+        }
+        for (const bot of g.bots) {
+          if (bot === juggernautBot) continue;
+          bot.alive = false;
+          bot.respawnTimer = 999;
+          bot.rig.root.visible = false;
+        }
+        juggernautBot.weaponId = 'minigun';
+        juggernautBot.def = WEAPON_DEFS.minigun;
+        juggernautBot.mag = juggernautBot.def.mag;
+        juggernautBot.maxHealth = JUGGERNAUT_MAX_HEALTH;
+        juggernautBot.health = JUGGERNAUT_MAX_HEALTH;
+        juggernautBot.maxArmor = JUGGERNAUT_MAX_ARMOR;
+        juggernautBot.armor = JUGGERNAUT_MAX_ARMOR;
+        juggernautBot.juggernaut = true;
+        juggernautBot.rig.setJuggernaut(true);
+        const built = buildWeapon('minigun', g.textures, false);
+        juggernautBot.rig.attachWeapon(
+          built.group,
+          built.anchors.foregrip,
+          built.anchors.muzzle,
+          built.anchors.grip
+        );
+        // This is a deterministic showroom actor, but it still goes through
+        // CharacterRig.update: the bomb-suit shells are mounted on the same
+        // ordinary-player bones that animate every live soldier.
+        juggernautBot.update = (dt) => {
+          juggernautBot.alive = true;
+          juggernautBot.rig.root.visible = true;
+          // ?pose=stand|aim|run|sprint|crouch|crouchaim drives the same
+          // locomotion states a live heavy would hit in a match.
+          const jugPose = params.get('pose') || (params.get('motion') === '1' ? 'run' : 'aim');
+          const jugRunning = jugPose === 'run' || jugPose === 'sprint';
+          // ?jugcam=front|side|back&dist=4.5 : hover directly ahead of the
+          // local camera and turn so the requested side faces the lens.
+          const jugView = params.get('jugcam') || 'front';
+          const jugDist = Number(params.get('dist') || 4.5);
+          const camYaw = g.player.yaw;
+          juggernautBot.position.set(
+            g.player.position.x - Math.sin(camYaw) * jugDist,
+            g.player.position.y,
+            g.player.position.z - Math.cos(camYaw) * jugDist
+          );
+          const jugYaw = camYaw + (jugView === 'side' ? Math.PI / 2
+            : jugView === 'left' ? -Math.PI / 2
+            : jugView === 'back' ? 0 : Math.PI);
+          juggernautBot.yaw = jugYaw;
+          juggernautBot.aimYaw = jugYaw;
+          juggernautBot.velocity.set(0, 0, jugRunning ? -1 : 0);
+          juggernautBot.rig.update(dt, {
+            position: juggernautBot.position,
+            yaw: juggernautBot.yaw,
+            pitch: -0.04,
+            speed: jugPose === 'sprint' ? 4.6 : jugPose === 'run' ? 3.2 : 0,
+            moveX: 0,
+            moveZ: jugRunning ? -1 : 0,
+            crouch: jugPose === 'crouch' || jugPose === 'crouchaim',
+            sliding: false,
+            aiming: jugPose === 'aim' || jugPose === 'crouchaim' || jugPose === 'stand',
+            grounded: true,
+            firing: false,
+            sprinting: jugPose === 'sprint',
+            invulnerable: false,
+          });
+        };
+      }
+      if (scenario === 'stance') {
+        const pose = params.get('pose') || 'stand';
+        stanceBot = g.bots.find((bot) => bot.team === 'red') || g.bots[0];
+        if (selectedWeapon) {
+          stanceBot.weaponId = selectedWeapon;
+          stanceBot.def = WEAPON_DEFS[selectedWeapon];
+          stanceBot.mag = stanceBot.def.mag;
+          const built = buildWeapon(selectedWeapon, g.textures, false);
+          stanceBot.rig.attachWeapon(
+            built.group,
+            built.anchors.foregrip,
+            built.anchors.muzzle,
+            built.anchors.grip
+          );
+        }
+        g.buildEnemyHudTargets = () => [];
+        if (params.get('clean') === '1') {
+          document.getElementById('hud').style.display = 'none';
+        }
+        for (const bot of g.bots) {
+          if (bot === stanceBot) continue;
+          bot.alive = false;
+          bot.respawnTimer = 999;
+          bot.rig.root.visible = false;
+        }
+        stanceBot.update = (dt) => {
+          const running = pose === 'run' || pose === 'sprint';
+          stanceBot.alive = true;
+          stanceBot.rig.root.visible = true;
+          stanceBot.position.set(0, 0, 45);
+          stanceBot.velocity.set(0, 0, running ? -1 : 0);
+          stanceBot.yaw = Math.PI;
+          stanceBot.rig.update(dt, {
+            position: stanceBot.position,
+            yaw: stanceBot.yaw,
+            pitch: 0,
+            speed: pose === 'sprint' ? 7 : pose === 'run' ? 5.4 : 0,
+            moveX: 0,
+            moveZ: running ? -1 : 0,
+            crouch: pose === 'crouch',
+            sliding: false,
+            aiming: false,
+            grounded: true,
+            firing: false,
+            sprinting: pose === 'sprint',
+            invulnerable: false,
+          });
+        };
+      }
+      if (scenario === 'jugfirst') {
+        g.setLocalJuggernaut(true);
+      }
+      if (scenario === 'sentrymarker') {
+        for (const bot of g.bots) {
+          bot.alive = false;
+          bot.rig.root.visible = false;
+        }
+        // The marker sits behind the central bunker. The harness deliberately
+        // supplies no line-of-sight result: this verifies the friendly sentry
+        // locator is a camera-frustum marker, not a visibility-ray marker.
+        g.buildSentryMarkers = () => [{
+          id: 'autoplay-friendly-sentry',
+          team: g.player.team,
+          x: 6,
+          y: 2.18,
+          z: -8,
+        }];
+      }
+      if (scenario === 'rapidvitals') {
+        g.viewModel.equip('sniper', true);
+        g.player.position.set(0, 0, 20);
+        g.player.velocity.set(0, 0, 0);
+        g.player.yaw = 0;
+        g.player.pitch = -0.02;
+        rapidBots = g.bots.filter((b) => b.team === 'red').slice(0, 2);
+        for (const bot of g.bots) {
+          if (rapidBots.includes(bot)) continue;
+          bot.alive = false;
+          bot.respawnTimer = 999;
+          bot.rig.root.visible = false;
+        }
+        rapidBots.forEach((bot, i) => {
+          bot.spawn(bot.position.set(i ? 2.4 : -2.4, 0, 10));
+          bot.velocity.set(0, 0, 0);
+          bot.yaw = Math.PI;
+        });
+      }
+      g.step = (dt) => {
+        t += dt;
+        const inp = g.input;
+        if (scenario !== 'manualwheel') inp.keys.clear();
+        if (scenario === 'streakwheel') inp.keys.add('KeyQ');
+        if (scenario === 'run' || scenario === 'fight') inp.keys.add('KeyW');
+        if (scenario === 'uavradio' || scenario === 'jugradio') inp.keys.add('KeyW');
+        if (scenario === 'jugfirst' && params.get('move') === '1') {
+          inp.keys.add('KeyW');
+          if (params.get('sprint') === '1') inp.keys.add('ShiftLeft');
+        }
+        if (scenario === 'sprint' || scenario === 'slide') {
+          inp.keys.add('KeyW');
+          inp.keys.add('ShiftLeft');
+          // slide again the moment the cooldown allows, so a screenshot at any
+          // point in the run is likely to catch one
+          if (scenario === 'slide' && g.player.canSlide()) inp.keyEdges.add('KeyC');
+        }
+        if (scenario === 'fight') {
+          inp.mouse[0] = t % 1.6 > 0.4;
+        }
+        if (scenario === 'castablet') {
+          g.player.position.set(0, 0, 26);
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = 0;
+          g.player.pitch = 0;
+          if (freezeHolster && g.casTargeting) {
+            g.casTargeting.entering = true;
+            g.casTargeting.holsterRemaining = 0.12;
+            g.viewModel.switchTotal = 0.42;
+            g.viewModel.switchT = 0.31;
+          }
+        }
+        if (scenario === 'sentrymarker') {
+          g.player.position.set(0, 0, 20);
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = 0;
+          g.player.pitch = 0;
+        }
+        if (scenario === 'cas') {
+          g.player.position.set(
+            Number(params.get('camx') || 0),
+            0,
+            Number(params.get('camz') || 44)
+          );
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = 0;
+          g.player.pitch = Number(params.get('pitch') || 0.65);
+          const run = g.casRuns.get('autoplay-cas');
+          if (run && params.get('live') !== '1') run.age = frozenCasAge;
+        }
+        if (scenario === 'airdrop' || scenario === 'airdropimpact') {
+          g.player.position.set(
+            Number(params.get('camx') || 0),
+            0,
+            Number(params.get('camz') || 27)
+          );
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = Number(params.get('yaw') || 0);
+          g.player.pitch = Number(params.get('pitch')
+            || (scenario === 'airdropimpact' ? -0.05 : 0.78));
+          g.player.bobAmp = 0;
+          const drop = g.airdrops.get('autoplay-airdrop');
+          if (drop) drop.age = frozenAirdropAge;
+          if (scenario === 'airdropimpact' && t - impactFxAt > 0.82) {
+            impactFxAt = t;
+            g.effects.airdropImpact(harnessAirdropTarget);
+          }
+        }
+        if (scenario === 'juggernaut' && juggernautBot) {
+          const view = params.get('view') || 'front';
+          const dist = Number(params.get('dist') || 3.8);
+          const angle = view === 'back'
+            ? Math.PI
+            : view === 'left'
+              ? -Math.PI / 2
+              : view === 'right'
+                ? Math.PI / 2
+                : view === 'threequarter'
+                  ? Math.PI / 4
+                  : 0;
+          g.player.position.set(
+            Math.sin(angle) * dist,
+            0,
+            45 + Math.cos(angle) * dist
+          );
+          g.player.velocity.set(0, 0, 0);
+          const toActorX = -g.player.position.x;
+          const toActorZ = 45 - g.player.position.z;
+          g.player.yaw = Math.atan2(-toActorX, -toActorZ);
+          g.player.pitch = Number(params.get('pitch') || -0.15);
+          g.player.bobAmp = 0;
+          juggernautBot.position.set(0, 0, 45);
+          juggernautBot.velocity.set(0, 0, 0);
+          juggernautBot.yaw = Math.PI;
+          juggernautBot.aimYaw = Math.PI;
+        }
+        if (scenario === 'stance' && stanceBot) {
+          const view = params.get('view') || 'front';
+          const dist = Number(params.get('dist') || 4.6);
+          const angle = view === 'back'
+            ? Math.PI
+            : view === 'left'
+              ? -Math.PI / 2
+              : view === 'right' || view === 'side'
+                ? Math.PI / 2
+                : view === 'threequarter'
+                  ? Math.PI / 4
+                  : 0;
+          g.player.position.set(
+            Math.sin(angle) * dist,
+            0,
+            45 + Math.cos(angle) * dist
+          );
+          g.player.velocity.set(0, 0, 0);
+          const toActorX = -g.player.position.x;
+          const toActorZ = 45 - g.player.position.z;
+          g.player.yaw = Math.atan2(-toActorX, -toActorZ);
+          g.player.pitch = Number(params.get('pitch') || -0.12);
+          g.player.bobAmp = 0;
+        }
+        if (scenario === 'jugfirst') {
+          if (t < 0.12) g.player.position.set(0, 0, 50);
+          if (params.get('move') !== '1') g.player.velocity.set(0, 0, 0);
+          g.player.yaw = 0;
+          g.player.pitch = -0.02;
+          if (params.get('move') !== '1') g.player.bobAmp = 0;
+        }
+        if ((scenario === 'uavradio' || scenario === 'jugradio') && g.streakCall) {
+          if (freezeHolster) {
+            g.streakCall.entering = true;
+            g.streakCall.holsterRemaining = 0.12;
+            g.viewModel.switchTotal = 0.42;
+            g.viewModel.switchT = 0.31;
+          }
+          const phase = Number(params.get('phase') || 0.45);
+          g.streakCall.age = g.streakCall.timing.duration * phase;
+          g.streakCall.progress = phase;
+        }
+        if (scenario === 'uavdrone') {
+          g.uav.time = 20;
+          // South apron has an unobstructed sky view; the map centre is under
+          // the command bunker roof and would hide the aircraft.
+          g.player.position.set(0, 0, 50);
+          g.player.velocity.set(0, 0, 0);
+          const droneTeam = params.get('enemy') === '1' ? 'red' : g.player.team;
+          const drone = g.uavDrones.get(`uav-${droneTeam}`);
+          if (drone) {
+            const dx = drone.view.position.x - g.player.position.x;
+            const dy = drone.view.position.y - (g.player.position.y + 1.62);
+            const dz = drone.view.position.z - g.player.position.z;
+            g.player.yaw = Math.atan2(-dx, -dz);
+            g.player.pitch = Math.atan2(dy, Math.hypot(dx, dz));
+            g.player.bobAmp = 0;
+          }
+        }
+        if (scenario === 'missiletablet' && g.streakCall) {
+          if (freezeHolster) {
+            g.streakCall.entering = true;
+            g.streakCall.holsterRemaining = 0.12;
+            g.viewModel.switchTotal = 0.42;
+            g.viewModel.switchT = 0.31;
+          }
+          const phase = Number(params.get('phase') || 0.50);
+          g.streakCall.age = g.streakCall.timing.duration * phase;
+          g.streakCall.progress = phase;
+        }
+        if (scenario === 'missilecam' && g.tvMissile) {
+          const positions = [[-7, 36], [0, 32], [7, 40]];
+          missileBots.forEach((bot, i) => {
+            bot.position.set(positions[i][0], 0, positions[i][1]);
+            bot.velocity.set(0, 0, 0);
+            bot.target = null;
+          });
+          const state = g.tvMissile.state;
+          state.position.set(0, 42, 60);
+          state.yaw = 0;
+          state.pitch = -1.05;
+          state.time = 2;
+          state.speed = 70;
+          state.diving = true;
+          g.tvMissileCam = 1;
+        }
+        if (scenario === 'ads') inp.mouse[2] = true;
+        // free-look camera parked at a given spot: ?s=at&p=x,y,z&look=yaw,pitch
+        if (scenario === 'at') {
+          const p = (params.get('p') || '0,0,20').split(',').map(Number);
+          const l = (params.get('look') || '0,0').split(',').map(Number);
+          g.player.position.set(p[0], p[1], p[2]);
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = l[0] * Math.PI / 180;
+          g.player.pitch = l[1] * Math.PI / 180;
+          g.player.bobAmp = 0;
+        }
+        if (scenario.startsWith('pose')) {
+          // clean look at an enemy soldier, in the open corridor between the
+          // central bunker and the south hangar. ?view=side|back circles the
+          // camera around him to check the weapon carry from other angles.
+          const view = params.get('view') || 'front';
+          const ang = view === 'side' ? Math.PI / 2 : view === 'back' ? Math.PI : 0;
+          const dist = Number(params.get("dist") || 6);
+          g.player.position.set(-4 + Math.sin(ang) * dist, 0, 14 + Math.cos(ang) * dist);
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = ang;
+          g.player.pitch = -0.03;
+          const bot = g.bots.find((b) => b.team === 'red') || g.bots[0];
+          if (bot) {
+            if (!bot.alive) { bot.spawn(bot.position.clone()); }
+            bot.position.set(t > 2 ? -2.8 : -4, 0, 14);
+            bot.yaw = Math.PI;
+            bot.target = g.player;
+          }
+          if (scenario === 'posefire') inp.mouse[0] = t > 0.15;
+          if (scenario === 'posescope') { g.viewModel.equip('sniper', true); inp.mouse[2] = true; }
+        }
+        if (scenario === 'watch' || scenario === 'watchads') {
+          // stand a few metres from the nearest enemy and stare at it
+          const bot = g.bots.filter((b) => b.team === 'red' && b.alive)
+            .sort((a, b) => a.position.distanceTo(g.player.position) - b.position.distanceTo(g.player.position))[0];
+          if (bot) {
+            const dx = bot.position.x - g.player.position.x;
+            const dz = bot.position.z - g.player.position.z;
+            const d = Math.hypot(dx, dz) || 1;
+            if (d > 7) {
+              g.player.position.x = bot.position.x - (dx / d) * 6;
+              g.player.position.z = bot.position.z - (dz / d) * 6;
+              g.player.position.y = bot.position.y;
+            }
+            g.player.yaw = Math.atan2(-(bot.position.x - g.player.position.x), -(bot.position.z - g.player.position.z));
+            g.player.pitch = -0.05;
+            if (scenario === 'watchads') inp.mouse[2] = true;
+            inp.mouse[0] = t % 1.4 > 0.9;
+          }
+        }
+        if (scenario === 'rapidvitals') {
+          g.player.position.set(0, 0, 20);
+          g.player.velocity.set(0, 0, 0);
+          g.player.yaw = 0;
+          g.player.pitch = -0.02;
+          rapidBots.forEach((bot, i) => {
+            if (!bot.alive) return;
+            bot.position.set(i ? 2.4 : -2.4, 0, 10);
+            bot.velocity.set(0, 0, 0);
+          });
+          const due = rapidKills === 0 ? 0.28 : 0.38;
+          if (rapidKills < rapidBots.length && t >= due) {
+            const bot = rapidBots[rapidKills++];
+            const point = bot.position.clone();
+            point.y += 1.7;
+            const dir = point.clone().sub(g.camera.position).normalize();
+            g.damageActor(g.player, {
+              actor: bot,
+              distance: g.camera.position.distanceTo(point),
+              point,
+              normal: dir.clone().negate(),
+              part: 'head',
+              mult: 2.2,
+            }, { ...g.viewModel.def, damage: 500, minDamage: 1 }, dir);
+            g.hud.killfeed.length = 0;
+            g.hud.popups.length = 0;
+            g.hud.banners.length = 0;
+            g.hud.killCard = null;
+          }
+        }
+        if (scenario === 'reload') {
+          inp.keyEdges.add('KeyR');
+          // spend a few rounds first so the full magazine does not ignore R
+          if (t < 0.5) inp.mouse[0] = true;
+        }
+        if (scenario === 'sniper') { g.viewModel.equip('sniper', true); inp.mouse[2] = true; }
+        if (scenario === 'shotgun') { g.viewModel.equip('shotgun', true); inp.mouse[0] = t % 1.2 > 0.6; }
+        if (scenario === 'death' && t > 0.6 && g.player.alive) {
+          g.player.takeDamage(999, { x: 0, y: 1, z: 0 }, { name: 'KILO-2', team: 'red' });
+        }
+        inp.dx = yawRate;
+        origStep(dt);
+        if (scenario === 'juggernaut') g.viewModel.holder.visible = false;
+      };
+    });
+  </script>
+</body>
+</html>

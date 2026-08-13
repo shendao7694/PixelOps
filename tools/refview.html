@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>glb reference viewer - dev harness</title>
+<style>html,body{margin:0;height:100%;overflow:hidden;background:#20262c}canvas{display:block}</style>
+</head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three.module.js" } }
+</script>
+<script type="module">
+// Renders one of the downloaded reference GLBs normalised to ~0.55 m length,
+// barrel down -Z, so proportions can be compared against the code-built guns.
+// ?f=low-poly_desert_eagle.glb&cam=x,y,z&at=x,y,z
+import * as THREE from 'three';
+import { GLTFLoader } from '../node_modules/three/examples/jsm/loaders/GLTFLoader.js';
+
+const params = new URLSearchParams(location.search);
+const file = params.get('f') || 'low-poly_desert_eagle.glb';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x2a3138);
+scene.add(new THREE.HemisphereLight(0xcfd8e0, 0x3a4048, 1.5));
+const key = new THREE.DirectionalLight(0xfff0d8, 2.0);
+key.position.set(-2.5, 3.5, 2.0);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x6f8fb8, 0.8);
+rim.position.set(2.0, -1.0, -2.5);
+scene.add(rim);
+
+const gltf = await new GLTFLoader().loadAsync('../' + file);
+const model = gltf.scene;
+scene.add(model);
+scene.add(new THREE.GridHelper(4, 20, 0x46505a, 0x343c44));
+
+// Skinned reference meshes ignore parent transforms, so instead of moving
+// the model we frame its bounding box: ?cam=x,y,z multipliers of the box
+// size added to its centre, ?at=x,y,z the aim offset in box-size units.
+const box = new THREE.Box3();
+model.traverse((o) => {
+  if (o.isSkinnedMesh) {
+    o.computeBoundingBox();           // posed vertices, not the raw accessor
+    box.union(o.boundingBox);
+  } else if (o.isMesh) {
+    box.union(new THREE.Box3().setFromObject(o));
+  }
+});
+if (box.isEmpty()) box.setFromObject(model);
+// ?cr= / ?cc= override the auto-framing (skinned FBX boxes are unreliable)
+let radius = Math.max(box.getSize(new THREE.Vector3()).toArray().concat([0])) || 1;
+let centre = box.getCenter(new THREE.Vector3());
+if (params.get('cr')) radius = Number(params.get('cr'));
+if (params.get('cc')) centre = new THREE.Vector3(...params.get('cc').split(',').map(Number));
+const size = new THREE.Vector3(radius, radius, radius);
+
+const camMul = (params.get('cam') || '-1.6,0.8,0.8').split(',').map(Number);
+const atMul = (params.get('at') || '0,0,0').split(',').map(Number);
+const camera = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.01, radius * 40 + 10);
+camera.position.set(
+  centre.x + camMul[0] * radius,
+  centre.y + camMul[1] * radius,
+  centre.z + camMul[2] * radius
+);
+camera.lookAt(
+  centre.x + atMul[0] * radius,
+  centre.y + atMul[1] * radius,
+  centre.z + atMul[2] * radius
+);
+renderer.render(scene, camera);
+window.__ready = true;
+</script>
+</body>
+</html>
