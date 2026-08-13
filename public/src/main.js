@@ -1,4 +1,12 @@
 // PIXEL OPS - boot, match logic, combat resolution and the main loop.
+// Hit-registration debugging: load with ?shotdebug=1 to trace the local
+// (non-authoritative) side of every shot, to pair with server PVP_SHOT_DEBUG.
+const SHOT_DEBUG = typeof location !== 'undefined'
+  && new URLSearchParams(location.search).has('shotdebug');
+function localShotLog(event, detail) {
+  if (!SHOT_DEBUG) return;
+  console.log(`[PVP-LOCAL] ${performance.now().toFixed(0)} ${event} ${detail}`);
+}
 import * as THREE from '../vendor/three.module.js';
 import { clamp, lerp, damp, rand, randInt, pick, TAU, angleDamp, angleDelta } from './core/math.js';
 import { loadSettings, saveSettings, adjustSetting } from './core/settings.js';
@@ -1145,12 +1153,14 @@ class Game {
     const origin = this.camera.position.clone();
     const aim = this.camera.getWorldDirection(new THREE.Vector3());
     const muzzleWorld = this.muzzleWorld();
+    let localHit = null;
     for (let i = 0; i < pellets; i++) {
       const dir = this.coneDir(aim, spread, new THREE.Vector3());
       const maxDistance = def.range * 2.2;
       const hit = def.piercesWorld
         ? null
         : this.castPvpVisual(origin, dir, maxDistance);
+      if (i === 0) localHit = hit;
       const end = def.piercesWorld
         ? origin.clone().addScaledVector(dir, maxDistance)
         : hit?.point || origin.clone().addScaledVector(dir, def.range * 1.6);
@@ -1170,6 +1180,13 @@ class Game {
         this.effects.impact(hit.point, hit.normal, hit.surface, def.id === 'shotgun' ? 0.6 : 1);
         this.audio.impact(hit.surface, hit.point);
       }
+    }
+    if (SHOT_DEBUG) {
+      const h = localHit;
+      const target = h
+        ? (h.actor ? (h.actor.id || 'actor') : (h.uav ? 'uav' : h.attackHelicopter ? 'heli' : h.surface || 'world'))
+        : 'miss';
+      localShotLog('local', `weapon=${def.id} spread=${spread.toFixed(4)} pellets=${pellets} hit=${target} dist=${h ? h.distance.toFixed(2) : '-'} part=${h?.part || '-'} aim=(${aim.x.toFixed(3)},${aim.y.toFixed(3)},${aim.z.toFixed(3)})`);
     }
     this.effects.muzzleSmoke(muzzleWorld, aim);
   }
@@ -7651,6 +7668,8 @@ class Game {
       const seq = ++this.pvpInputSeq;
       const reload = Boolean(this.pvpReloadQueued && !railgunCommit);
       const grenadeThrow = Boolean(this.pvpGrenadeThrowQueued);
+      const triggerEdge = (railgunCommit || pvpTrigger) && !this._lastShotTrigger;
+      this._lastShotTrigger = railgunCommit || pvpTrigger;
       const meleeAttack = Boolean(this.pvpMeleeQueued);
       const weapon = vm.pendingWeapon || vm.def.id;
       const shotAim = pvpShotAimForInput(this.pvpShotAim, {
@@ -7686,7 +7705,14 @@ class Game {
         yaw: this.tvMissile ? this.tvMissile.wantYaw : shotAim.yaw,
         pitch: this.tvMissile ? this.tvMissile.wantPitch : shotAim.pitch,
       });
-      if (inputSent && shotAim.usesPending) this.pvpShotAim = null;
+      if (SHOT_DEBUG && triggerEdge && inputSent) {
+        localShotLog('send', `seq=${seq} weapon=${weapon} trigger=1 ads=${cmd.aim ? 1 : 0} look=(${shotAim.yaw.toFixed(4)},${shotAim.pitch.toFixed(4)}) usesPending=${shotAim.usesPending ? 1 : 0}`);
+      }
+      // NOTE: keep pvpShotAim alive across the whole trigger hold. Releasing it
+      // here after a single packet let the next held-trigger packet carry the
+      // post-aimKick pitch, overwriting the pre-kick aim on the server and
+      // pushing the authoritative round above the crosshair. The pending aim is
+      // instead cleared on trigger release / TTL expiry via `discardPending`.
       if (reload) {
         if (this.pvpPredictedReload?.weapon !== vm.def.id) {
           this.pvpPredictedReload = { weapon: vm.def.id, seq };

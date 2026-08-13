@@ -192,6 +192,17 @@ const NOTFIGHTROOMS = [4]
 const TICK_DT = 1 / PVP_TICK_RATE;
 const TICK_PUMP_MS = Math.max(4, PVP_TICK_MS / 2);
 const MAX_TICK_CATCHUP = 4;
+// Hit-registration debugging. Set PVP_SHOT_DEBUG=1 when running serve.mjs to
+// trace every authoritative shot decision. Off by default (no production cost).
+const SHOT_DEBUG = process.env.PVP_SHOT_DEBUG === '1';
+function shotLog(player, event, detail) {
+  if (!SHOT_DEBUG) return;
+  const id = player?.id ? player.id.slice(0, 8) : '?';
+  console.log(`[PVP-SHOT] ${Date.now()} ${id} ${event} ${detail}`);
+}
+function fmtV(v) {
+  return `(${[v[0], v[1], v[2]].map((n) => Number(n).toFixed(2)).join(',')})`;
+}
 // Network snapshots stay at 45 Hz while movement uses deterministic substeps
 // shared with client prediction, keeping ramp and ledge collision stable.
 const MOVEMENT_DT = TICK_DT / PVP_MOVEMENT_SUBSTEPS;
@@ -1333,6 +1344,9 @@ function handleInput(player, message) {
   player.input.crouch = message.crouch === true;
   player.input.sprint = message.sprint === true;
   player.input.aim = message.aim === true;
+  if (SHOT_DEBUG && message.trigger !== player.input.trigger) {
+    shotLog(player, 'input', `seq=${seq} trigger=${message.trigger === true ? 1 : 0} aim=${message.aim === true ? 1 : 0} sprint=${message.sprint === true ? 1 : 0} weapon=${message.weapon} yaw=${Number(message.yaw).toFixed(4)} pitch=${Number(message.pitch).toFixed(4)}`);
+  }
   player.input.trigger = message.trigger === true;
   player.input.grenade = message.grenade === true;
   player.input.grenadeAim = message.grenadeAim === true;
@@ -1956,7 +1970,12 @@ function tickPlayer(room, player, now) {
   const def = WEAPON_DEFS[player.weaponId];
   player.adsBlend = damp(
     player.adsBlend,
-    !def.melee && !usingGrenade && input.aim && !input.sprint
+    // Use the actual sprint state (a.sprinting), not the raw Shift input. The
+    // actor can only sprint while NOT aiming (!cmd.aim), so a held Shift key
+    // alongside aim must not read as "sprinting" here — otherwise the server
+    // forces hip-fire while the client (viewmodel uses player.sprinting) still
+    // shows the scope, and the authoritative round fires with hip-fire spread.
+    !def.melee && !usingGrenade && input.aim && !a.sprinting
       && !player.reload ? 1 : 0,
     1 / Math.max(0.04, def.adsTime * 0.35),
     TICK_DT
@@ -2286,6 +2305,30 @@ function tickWeapon(room, player, now) {
     && !player.reload
     && spunUp
     && (def.melee || unlimitedAmmo || ammo.mag > 0);
+  if (SHOT_DEBUG && fresh) {
+    // Log the full decision chain on every trigger rising edge so a swallowed
+    // round can be attributed to the exact gate that rejected it.
+    shotLog(player, 'tick', [
+      `weapon=${def.id}`,
+      `rawWants=${rawWants ? 1 : 0}`,
+      `wants=${wants ? 1 : 0}`,
+      `canFire=${canFire ? 1 : 0}`,
+      `alive=${player.actor.alive ? 1 : 0}`,
+      `sprint=${player.actor.sprinting ? 1 : 0}`,
+      `switch=${player.weaponSwitch ? 1 : 0}`,
+      `cooldown=${player.fireCooldown.toFixed(3)}`,
+      `reload=${player.reload ? 1 : 0}`,
+      `spunUp=${spunUp ? 1 : 0}`,
+      `mag=${ammo.mag}`,
+      `adsBlend=${player.adsBlend.toFixed(3)}`,
+      `spread=${weaponSpread(player, def).toFixed(4)}`,
+      `blocked=${player.triggerBlockedUntilRelease ? 1 : 0}`,
+      `inputAim=${player.input.aim ? 1 : 0}`,
+      `inputSprint=${player.input.sprint ? 1 : 0}`,
+      `yaw=${player.actor.yaw.toFixed(4)}`,
+      `pitch=${player.actor.pitch.toFixed(4)}`,
+    ].join(' '));
+  }
   if (wants && canFire) {
     firePlayerWeapon(room, player, def, unlimitedAmmo);
     if (def.chargeTime && player.railgunActive) {
@@ -2502,6 +2545,8 @@ function firePlayerWeapon(room, shooter, def, unlimitedAmmo = false) {
   let uavDestroyed = false;
   let attackHelicopterDestroyed = false;
   const targetVitals = new Map();
+  let firstHitKind = 'none';
+  let firstHitDist = 0;
 
   for (let i = 0; i < def.pellets; i++) {
     const dir = coneDirection(aim, spread);
@@ -2510,6 +2555,10 @@ function firePlayerWeapon(room, shooter, def, unlimitedAmmo = false) {
       ? castRoomPiercingRay(room, shooter, origin, dir, maxDistance)
       : [castRoomRay(room, shooter, shooter.team, origin, dir, maxDistance)]
         .filter(Boolean);
+    if (i === 0) {
+      firstHitKind = hits.length ? hits[0].kind : 'miss';
+      firstHitDist = hits.length ? hits[0].distance : 0;
+    }
     const end = def.piercesWorld
       ? origin.clone().addScaledVector(dir, maxDistance)
       : hits[0]?.point
@@ -2580,6 +2629,22 @@ function firePlayerWeapon(room, shooter, def, unlimitedAmmo = false) {
     impacts,
     firing: shooter.firingSeq,
   });
+  if (SHOT_DEBUG) {
+    shotLog(shooter, 'fire', [
+      `firingSeq=${shooter.firingSeq}`,
+      `weapon=${def.id}`,
+      `origin=${fmtV(vec3(origin))}`,
+      `aim=${fmtV([aim.x, aim.y, aim.z])}`,
+      `spread=${spread.toFixed(4)}`,
+      `pellets=${def.pellets}`,
+      `firstHit=${firstHitKind}`,
+      `dist=${firstHitDist.toFixed(2)}`,
+      `anyHit=${anyHit ? 1 : 0}`,
+      `head=${anyHead ? 1 : 0}`,
+      `killed=${killed}`,
+      `dmg=${totalDamage.toFixed(1)}`,
+    ].join(' '));
+  }
   if (anyHit) {
     send(shooter.ws, {
       type: 'feedback',
@@ -2648,10 +2713,12 @@ function castRoomRay(room, shooter, team, origin, dir, maxDistance) {
 
 function damagePlayer(room, attacker, victim, hit, def, dir, sourceScale) {
   if (!canDamagePvpTarget(attacker, victim)) {
+    if (SHOT_DEBUG) shotLog(attacker, 'blocked', `target=${victim.id} reason=friendly-fire-disabled team=${attacker.team}vs${victim.team}`);
     return { killed: false, armorBroke: false, damage: 0 };
   }
   if (!victim.actor.alive) return { killed: false, armorBroke: false, damage: 0 };
   if (playerIsInvulnerable(victim)) {
+    if (SHOT_DEBUG) shotLog(attacker, 'blocked', `target=${victim.id} reason=invulnerable until=${victim.invulnerableUntil} now=${Date.now()}`);
     return { killed: false, armorBroke: false, damage: 0, blocked: true };
   }
   const fixedRailgunDamage = def.id === LASER_CANNON_ID;
