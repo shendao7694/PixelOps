@@ -1,4 +1,4 @@
-const HX = 80 * 5, HZ = 66 * 5;
+const HX = 80, HZ = 66;
 
 const parts = [
   {
@@ -9,8 +9,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -20,8 +19,7 @@ const parts = [
     "h": 4,
     "thick": 0.6,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "slab",
@@ -60,8 +58,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -71,8 +68,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -82,8 +78,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "stairs",
@@ -97,8 +92,7 @@ const parts = [
     "mat": "metalDark",
     "axis": "z",
     "dir": 1,
-    "thick": 1,
-    "rotation": 180
+    "thick": 1
   },
   {
     "kind": "stairs",
@@ -111,8 +105,7 @@ const parts = [
     "width": 3,
     "mat": "metalDark",
     "axis": "z",
-    "dir": 1,
-    "rotation": 180
+    "dir": 1
   },
   {
     "kind": "box",
@@ -150,8 +143,7 @@ const parts = [
     "width": 3,
     "mat": "metalDark",
     "axis": "z",
-    "dir": 1,
-    "rotation": 180
+    "dir": 1
   },
   {
     "kind": "wall",
@@ -161,8 +153,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -172,8 +163,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "stairs",
@@ -249,8 +239,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "box",
@@ -270,8 +259,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -300,8 +288,7 @@ const parts = [
     "h": 4,
     "thick": 0.6,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -320,8 +307,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -331,8 +317,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -342,8 +327,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "box",
@@ -391,8 +375,7 @@ const parts = [
     "h": 4,
     "thick": 0.5,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "box",
@@ -803,24 +786,13 @@ const parts = [
   },
   {
     "kind": "wall",
-    "x": 385.5,
-    "z": -341.5,
-    "len": 8,
-    "h": 4,
-    "thick": 0.6,
-    "mat": "concrete",
-    "axis": "x"
-  },
-  {
-    "kind": "wall",
     "x": 72.5,
     "z": 54,
     "len": 8,
     "h": 4,
     "thick": 0.6,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "wall",
@@ -850,8 +822,7 @@ const parts = [
     "h": 4,
     "thick": 0.6,
     "mat": "concrete",
-    "axis": "z",
-    "rotation": 90
+    "axis": "z"
   },
   {
     "kind": "slab",

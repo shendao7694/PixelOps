@@ -509,12 +509,83 @@ export function resetPartIds(parts) {
   nextId = max + 1;
 }
 
-/** Expand one part into raw boxes. */
+/**
+ * Rotate one box about the part origin in the XZ plane (the editor applies
+ * `group.rotation.y`, so this is the runtime equivalent). For the 90°/180°
+ * rotations used by shipped maps the result is still axis-aligned, so
+ * re-bounding the four corners is exact. Non-right-angle rotations (the editor
+ * offers 5° steps) fall back to a conservative AABB: render and collision stay
+ * in lock-step and never tunnel, at the cost of a slightly fatter footprint.
+ */
+function rotateBox(b, ox, oz, deg) {
+  const r = deg * Math.PI / 180;
+  const c = Math.cos(r), s = Math.sin(r);
+  const hw = b.w / 2, hd = b.d / 2;
+  const cx = b.x - ox, cz = b.z - oz;
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (const [sx, sz] of [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]]) {
+    const px = cx + sx, pz = cz + sz;
+    const rx = px * c + pz * s;
+    const rz = -px * s + pz * c;
+    if (rx < minX) minX = rx;
+    if (rx > maxX) maxX = rx;
+    if (rz < minZ) minZ = rz;
+    if (rz > maxZ) maxZ = rz;
+  }
+  b.x = ox + (minX + maxX) / 2;
+  b.z = oz + (minZ + maxZ) / 2;
+  b.w = maxX - minX;
+  b.d = maxZ - minZ;
+}
+
+/**
+ * Rotate a stair/ramp slope descriptor to match the rotated ghost box. The
+ * ramp is a line from its low end (`start`, at baseY) to its high end
+ * (`start + dir * length`, at baseY + rise); rotate both ends and rebuild the
+ * axis-aligned description from them. baseY/rise are untouched (rotation is
+ * about the vertical axis), so callers still stamp `baseY` from the box.
+ */
+function rotateRamp(ramp, ox, oz, deg) {
+  const r = deg * Math.PI / 180;
+  const c = Math.cos(r), s = Math.sin(r);
+  let lx, lz, hx, hz;
+  if (ramp.axis === 'x') {
+    lx = ramp.start - ox; lz = 0;
+    hx = ramp.start + ramp.dir * ramp.length - ox; hz = 0;
+  } else {
+    lx = 0; lz = ramp.start - oz;
+    hx = 0; hz = ramp.start + ramp.dir * ramp.length - oz;
+  }
+  const lx2 = lx * c + lz * s, lz2 = -lx * s + lz * c;
+  const hx2 = hx * c + hz * s, hz2 = -hx * s + hz * c;
+  const dx = hx2 - lx2, dz = hz2 - lz2;
+  if (Math.abs(dx) >= Math.abs(dz)) {
+    ramp.axis = 'x';
+    ramp.start = ox + lx2;
+    ramp.dir = dx >= 0 ? 1 : -1;
+    ramp.length = Math.abs(dx);
+  } else {
+    ramp.axis = 'z';
+    ramp.start = oz + lz2;
+    ramp.dir = dz >= 0 ? 1 : -1;
+    ramp.length = Math.abs(dz);
+  }
+}
+
+/** Expand one part into raw boxes, applying the part's `rotation` if present. */
 export function expandPart(part) {
   const def = PART_KINDS[part.kind];
   if (!def) return [];
   const out = [];
   def.expand(part, out);
+  const rot = part.rotation;
+  if (rot) {
+    const ox = part.x || 0, oz = part.z || 0;
+    for (const b of out) {
+      rotateBox(b, ox, oz, rot);
+      if (b.opts && b.opts.ramp) rotateRamp(b.opts.ramp, ox, oz, rot);
+    }
+  }
   return out;
 }
 
