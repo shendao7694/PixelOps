@@ -4316,6 +4316,411 @@ export function getPvpStatus() {
   };
 }
 
+const cmdData = {
+  handleRoom: undefined,
+}
+
+function resolveAllPlayers(room) {
+  return [...room.players.values()];
+}
+
+function resolveNearestPlayer(room, targetName) {
+  let targetPlayer = null;
+  for (const [, p] of room.players) {
+    if (p.name === targetName) {
+      targetPlayer = p;
+      break;
+    }
+  }
+  if (!targetPlayer) return null;
+  
+  let closest = null;
+  let closestDist = Infinity;
+  const sourcePos = targetPlayer.actor.position;
+  for (const [, p] of room.players) {
+    if (p.id === targetPlayer.id) continue;
+    if (!p.actor.alive) continue;
+    const dist = sourcePos.distanceTo(p.actor.position);
+    if (dist < closestDist) {
+      closestDist = dist;
+      closest = p;
+    }
+  }
+  return closest;
+}
+
+function resolvePlayerByName(room, name) {
+  for (const [, p] of room.players) {
+    if (p.name === name) return p;
+  }
+  return null;
+}
+
+function resolveSelector(room, selector) {
+  if (selector === '@a') {
+    return resolveAllPlayers(room);
+  } else if (selector.startsWith('@p[')) {
+    const match = selector.match(/@p\[obj=(.+)\]/);
+    if (!match) return [];
+    const target = resolveNearestPlayer(room, match[1]);
+    return target ? [target] : [];
+  } else {
+    const target = resolvePlayerByName(room, selector);
+    return target ? [target] : [];
+  }
+}
+
+export function onCommand(cmd) {
+  const parts = cmd.trim().split(/\s+/);
+  if (parts.length === 0) {
+    console.log('Empty command');
+    return;
+  }
+
+  const command = parts[0].toLowerCase();
+  const args = parts.slice(1);
+
+  if (command === 'help') {
+    console.log('Available commands:');
+    console.log('  join <roomId>     - Join a room (1-5)');
+    console.log('  leave             - Leave current room');
+    console.log('  list              - List players in current room');
+    console.log('  hpset <selector> <health> <maxHealth> - Set player health');
+    console.log('  tp <selector1> <selector2 | x y z> - Teleport players');
+    console.log('  kill <selector>   - Kill players');
+    console.log('  kick <selector>   - Kick players from server');
+    console.log('  ban <selector> <minutes> - Ban players');
+    console.log('  banlist           - List all active bans');
+    console.log('  unban <playerName> - Unban a player');
+    console.log('  score <selector> <amount> - Add score to players');
+    console.log('  broadcast <message> - Broadcast message to room');
+    console.log('  help              - Show this help message');
+    console.log('');
+    console.log('Selectors:');
+    console.log('  @a                - All players');
+    console.log('  @p[obj=name]      - Nearest player to specified player');
+    console.log('  name              - Player name');
+    console.log('');
+    console.log('Examples:');
+    console.log('  join 1');
+    console.log('  hpset @a 100 100');
+    console.log('  tp PLAYER-1234 @p[obj=PLAYER-5678]');
+    console.log('  kill @a');
+    console.log('  kick PLAYER-6666');
+    console.log('  ban @a 60');
+    console.log('  broadcast Hello everyone');
+    return;
+  }
+
+  if (command === 'join') {
+    if (args.length === 0) {
+      console.log('Usage: join <roomId> (1-5)');
+      return;
+    }
+    const roomId = parseInt(args[0]);
+    if (isNaN(roomId) || roomId < 1 || roomId > 5) {
+      console.log('Invalid room ID. Must be 0-4');
+      return;
+    }
+    const targetRoom = rooms.find(r => r.number === roomId);
+    if (!targetRoom) {
+      console.log('Room not found');
+      return;
+    }
+    if (targetRoom.players.size >= PVP_ROOM_CAPACITY) {
+      console.log('Room is full');
+      return;
+    }
+    cmdData.handleRoom = targetRoom;
+    console.log(`Joined room ${roomId}`);
+    return;
+  }
+
+  if (command === 'leave') {
+    if (!cmdData.handleRoom) {
+      console.log('Not in a room');
+      return;
+    }
+    cmdData.handleRoom = undefined;
+    console.log('Left room');
+    return;
+  }
+
+  const room = cmdData.handleRoom;
+  if (!room) {
+    console.log('Not in a room. Use join <roomId>');
+    return;
+  }
+
+  if (command === 'hpset') {
+    if (args.length < 2) {
+      console.log('Usage: hpset <selector> <health> <maxHealth>');
+      return;
+    }
+    const selector = args[0];
+    const health = parseFloat(args[1]);
+    const maxHealth = args[2] ? parseFloat(args[2]) : health;
+    if (isNaN(health)) {
+      console.log('Invalid health value');
+      return;
+    }
+    const targets = resolveSelector(room, selector);
+    if (targets.length === 0) {
+      console.log('No players found');
+      return;
+    }
+    for (const target of targets) {
+      target.actor.health = health;
+      target.actor.maxHealth = maxHealth;
+    }
+    console.log(`Set health of ${targets.length} player(s) to ${health}/${maxHealth}`);
+    return;
+  }
+
+  if (command === 'tp') {
+    if (args.length < 2) {
+      console.log('Usage: tp <selector1> <selector2 | x y z>');
+      return;
+    }
+    const selector1 = args[0];
+    const targets = resolveSelector(room, selector1);
+    if (targets.length === 0) {
+      console.log('No players found for selector1');
+      return;
+    }
+
+    const x = parseFloat(args[1]);
+    const y = parseFloat(args[2]);
+    const z = parseFloat(args[3]);
+    const isCoord = args.length >= 4 && !isNaN(x) && !isNaN(y) && !isNaN(z);
+
+    if (isCoord) {
+      for (const target of targets) {
+        target.actor.position.set(x, y, z);
+      }
+      console.log(`Teleported ${targets.length} player(s) to (${x}, ${y}, ${z})`);
+      return;
+    } else {
+      const selector2 = args[1];
+      const targets2 = resolveSelector(room, selector2);
+      if (targets2.length === 0) {
+        console.log('No players found for selector2');
+        return;
+      }
+      const destination = targets2[0];
+      for (const target of targets) {
+        target.actor.position.copy(destination.actor.position);
+      }
+      console.log(`Teleported ${targets.length} player(s) to ${destination.name}`);
+      return;
+    }
+  }
+
+  if (command === 'kick') {
+    if (args.length === 0) {
+      console.log('Usage: kick <selector>');
+      return;
+    }
+    const selector = args[0];
+    const targets = resolveSelector(room, selector);
+    if (targets.length === 0) {
+      console.log('No players found');
+      return;
+    }
+    const kickedNames = [];
+    for (const target of targets) {
+      kickedNames.push(target.name);
+      send(target.ws, {
+        type: 'kicked',
+        reason: 'KICKED',
+        message: 'You have been kicked by console',
+        banUntil: 0,
+      });
+      leaveRoom(target.ws);
+    }
+    console.log(`Kicked: ${kickedNames.join(', ')}`);
+    return;
+  }
+
+  if (command === 'ban') {
+    if (args.length < 2) {
+      console.log('Usage: ban <selector> <minutes>');
+      return;
+    }
+    const selector = args[0];
+    const minutes = parseInt(args[1]);
+    if (isNaN(minutes) || minutes <= 0) {
+      console.log('Invalid minutes');
+      return;
+    }
+    const targets = resolveSelector(room, selector);
+    if (targets.length === 0) {
+      console.log('No players found');
+      return;
+    }
+    const until = Date.now() + minutes * 60 * 1000;
+    const bannedNames = [];
+    for (const target of targets) {
+      bannedNames.push(target.name);
+      send(target.ws, {
+        type: 'kicked',
+        reason: 'BANNED',
+        message: `You have been banned for ${minutes} minutes`,
+        banUntil: until,
+      });
+      banIdentity(target.identityKeys, target.name, until);
+      leaveRoom(target.ws);
+    }
+    console.log(`Banned ${bannedNames.join(', ')} for ${minutes} minutes`);
+    return;
+  }
+
+  if (command === 'banlist') {
+    const list = [];
+    for (const [key, entry] of bans) {
+      if (entry.until > Date.now()) {
+        list.push(`${entry.name} - until ${new Date(entry.until).toISOString()}`);
+      }
+    }
+    if (list.length === 0) {
+      console.log('No active bans');
+    } else {
+      console.log('Active bans:');
+      for (const item of list) {
+        console.log(`  ${item}`);
+      }
+    }
+    return;
+  }
+
+  if (command === 'unban') {
+    if (args.length === 0) {
+      console.log('Usage: unban <playerName>');
+      return;
+    }
+    const name = args[0];
+    let found = false;
+    for (const [key, entry] of bans) {
+      if (entry.name === name && entry.until > Date.now()) {
+        bans.delete(key);
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      console.log('Player not banned or ban expired');
+      return;
+    }
+    persistBans();
+    console.log(`Unbanned: ${name}`);
+    return;
+  }
+
+  if (command === 'list') {
+    const players = [];
+    for (const [, p] of room.players) {
+      players.push(`${p.name} (${p.team}, ${p.actor.alive ? 'alive' : 'dead'})`);
+    }
+    if (players.length === 0) {
+      console.log('No players in room');
+    } else {
+      console.log(`Players in room (${players.length}):`);
+      for (const p of players) {
+        console.log(`  ${p}`);
+      }
+    }
+    return;
+  }
+
+  if (command === 'kill') {
+    if (args.length === 0) {
+      console.log('Usage: kill <selector>');
+      return;
+    }
+    const selector = args[0];
+    const targets = resolveSelector(room, selector);
+    if (targets.length === 0) {
+      console.log('No players found');
+      return;
+    }
+    const killedNames = [];
+    for (const target of targets) {
+      if (!target.actor.alive) {
+        continue;
+      }
+      killedNames.push(target.name);
+      registerDeath(room, target, null, 'gravity', false);
+    }
+    console.log(`Killed: ${killedNames.join(', ')}`);
+    return;
+  }
+
+  if (command === 'score') {
+  if (args.length < 2) {
+    console.log('Usage: score <selector> <amount>');
+    return;
+  }
+  const selector = args[0];
+  const amount = parseInt(args[1]);
+  if (isNaN(amount)) {
+    console.log('Invalid amount');
+    return;
+  }
+  const targets = resolveSelector(room, selector);
+    if (targets.length === 0) {
+      console.log('No players found');
+      return;
+    }
+    for (const target of targets) {
+      awardScore(target, amount);
+      const rewards = [
+        ['uav', 'uavCharges'],
+        [LASER_CANNON_ID, 'railgunCharges'],
+        ['strike', 'strikeCharges'],
+        ['juggernaut', 'juggernautCharges'],
+        ['sentry', 'sentryCharges'],
+        ['cas', 'casCharges'],
+        ['firebomb', 'firebombCharges'],
+        ['attack_helicopter', 'attackHelicopterCharges'],
+      ];
+      for (const [reward, chargeKey] of rewards) {
+        if (!loadoutHasStreak(target.loadout, reward)) continue;
+        const count = loadoutStreakCrossings(
+          target.loadout,
+          reward,
+          target.streak,
+          target.streak + Math.floor(amount / 100)
+        );
+        if (count <= 0) continue;
+        target[chargeKey] += count;
+      }
+      target.streak += Math.floor(amount / 100);
+    }
+    console.log(`Added ${amount} score to ${targets.length} player(s)`);
+    return;
+  }
+
+  if (command === 'broadcast') {
+    if (args.length === 0) {
+      console.log('Usage: broadcast <message>');
+      return;
+    }
+    const message = args.join(' ');
+    broadcast(room, {
+      type: 'chat',
+      playerId: 'Console',
+      name: 'Console',
+      team: 'blue',
+      text: `[SERVER] ${message}`,
+      serverTime: Date.now(),
+    });
+    console.log(`Broadcast: ${message}`);
+    return;
+  }
+
+  console.log('Unknown command');
+}
+
 function finiteClamp(value, min, max, fallback) {
   const n = Number(value);
   return Number.isFinite(n) ? clamp(n, min, max) : fallback;
