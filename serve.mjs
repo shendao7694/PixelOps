@@ -3,11 +3,13 @@ import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import readline from 'node:readline';
 import {
   attachPvpServer,
   clientIpFromRequest,
   getPvpStatus,
   isRoutableIp,
+  onCommand
 } from './server/pvp-server.mjs';
 import { handleAuthHttp } from './server/auth.mjs';
 import { lookupIpCountry, publicRegionResult } from './server/client-region.mjs';
@@ -56,7 +58,7 @@ const server = createServer(async (req, res) => {
     const requested = url === '/' ? 'index.html' : url.replace(/^[/\\]+/, '');
     const requestedKey = requested.replaceAll('\\', '/').toLowerCase();
     if (requestedKey === '.runtime' || requestedKey.startsWith('.runtime/')) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
+      res.writeHead(404, { 'Content-Type': 'text/plain' }).end('404 Not Found');
       return;
     }
     let path = resolve(ROOT, requested);
@@ -71,15 +73,13 @@ const server = createServer(async (req, res) => {
     const extension = extname(path);
     res.writeHead(200, {
       'Content-Type': TYPES[extension] || 'application/octet-stream',
-      // The A-10 GLB is immutable and sizeable; cache it after the first
-      // reward instead of transferring 7 MB again on every visit.
       'Cache-Control': extension === '.glb'
         ? 'public, max-age=31536000, immutable'
         : 'no-cache',
     });
     res.end(data);
   } catch (err) {
-    res.writeHead(404, { 'Content-Type': 'text/plain' }).end('not found');
+    res.writeHead(404, { 'Content-Type': 'text/plain' }).end('404 Not Found');
   }
 });
 
@@ -92,4 +92,53 @@ server.listen(PORT, HOST, () => {
   console.log(`  PVP: ${roomCount} rooms x ${capacityPerRoom} players, authoritative ${tickRate} tick/s`);
   console.log('  press Ctrl+C to stop');
   console.log('');
+  
+  let input = '';
+  
+  readline.emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  
+  const renderPrompt = () => {
+    process.stdout.write('> ');
+  };
+  
+  const clearLine = () => {
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+  };
+  
+  process.stdin.on('keypress', (str, key) => {
+    if (key.ctrl && key.name === 'c') {
+      console.log('\n');
+      process.exit();
+      return;
+    }
+    
+    if (key.name === 'return') {
+      clearLine();
+      const cmd = input.trim();
+      input = '';
+      if (cmd) {
+        onCommand(cmd);
+      }
+      renderPrompt();
+      return;
+    }
+    
+    if (key.name === 'backspace') {
+      if (input.length > 0) {
+        input = input.slice(0, -1);
+        clearLine();
+        process.stdout.write('> ' + input);
+      }
+      return;
+    }
+    
+    if (str && str.length === 1 && str.charCodeAt(0) >= 32 && !key.ctrl && !key.meta) {
+      input += str;
+      process.stdout.write(str);
+    }
+  });
+  
+  renderPrompt();
 });
