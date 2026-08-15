@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { createWriteStream, mkdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { dirname } from 'node:path';
@@ -187,6 +188,20 @@ import {
   decodeInputPacket,
   encodeSnapshotPacket,
 } from '../public/src/net/pvp-wire.js';
+import {
+  AnticheatMgr,
+  ANTICHEAT_AIM_SNAP_DEGREES,
+  ANTICHEAT_KICK_SCORE,
+  ANTICHEAT_LOCK_TICKS,
+  ANTICHEAT_LOCK_REQUIRE_MOVE,
+  ANTICHEAT_LOCK_MIN_MOVE,
+  ANTICHEAT_LOCK_HY_STDDEV,
+  ANTICHEAT_LOCK_ENABLED,
+  ANTICHEAT_LAG_REVERSALS_NEEDED,
+  ANTICHEAT_LAG_ZERO_MAX,
+  ANTICHEAT_LAG_MIN_STEP,
+  ANTICHEAT_LAG_MAX_DELAY,
+} from './anticheat.mjs';
 
 const NOTFIGHTROOMS = [4]
 const TICK_DT = 1 / PVP_TICK_RATE;
@@ -200,6 +215,37 @@ function shotLog(player, event, detail) {
   const id = player?.id ? player.id.slice(0, 8) : '?';
   console.log(`[PVP-SHOT] ${Date.now()} ${id} ${event} ${detail}`);
 }
+// Anti-cheat metric tracing. Set PVP_ANTICHEAT_DEBUG=1 when running serve.mjs
+// to emit one JSON line per firing input tick (aim error + log(offset) + snap
+// magnitude + lock state) for offline threshold tuning. Lines are echoed to the
+// console and appended to a per-startup file under .runtime/, keyed by the
+// server start timestamp so separate runs never clobber each other. Off by
+// default.
+const ANTICHEAT_DEBUG = process.env.PVP_ANTICHEAT_DEBUG === '1';
+const ANTICHEAT_LOG_PATH = (() => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return fileURLToPath(
+    new URL(`../.runtime/anticheat-debug-${stamp}.log`, import.meta.url)
+  );
+})();
+const ANTICHEAT_LOG = (() => {
+  if (!ANTICHEAT_DEBUG) return null;
+  try {
+    mkdirSync(dirname(ANTICHEAT_LOG_PATH), { recursive: true });
+    return createWriteStream(ANTICHEAT_LOG_PATH, { flags: 'a' });
+  } catch {
+    return null;
+  }
+})();
+function acLog(player, detail) {
+  if (!ANTICHEAT_DEBUG) return;
+  const id = player?.id ? player.id.slice(0, 8) : '?';
+  const line = `[PVP-AC] ${Date.now()} ${id} ${detail}`;
+  console.log(line);
+  if (ANTICHEAT_LOG) ANTICHEAT_LOG.write(line + '\n');
+}
 function fmtV(v) {
   return `(${[v[0], v[1], v[2]].map((n) => Number(n).toFixed(2)).join(',')})`;
 }
@@ -208,6 +254,36 @@ function fmtV(v) {
 const MOVEMENT_DT = TICK_DT / PVP_MOVEMENT_SUBSTEPS;
 const ASSIST_SCORE = 30;
 const ASSIST_WINDOW_MS = 10_000;
+// Unified anti-cheat scoring. Detection hooks feed this one manager; crossing
+// the threshold removes the player through the reusable kick path.
+// Thresholds are tunable via env (PVP_ANTICHEAT_*) so the detection can be
+// calibrated against recorded cheat samples without editing code.
+const anticheatEnvNum = (name, fallback) => {
+  const v = Number(process.env[name]);
+  return Number.isFinite(v) ? v : fallback;
+};
+const anticheatEnvFlag = (name, fallback) => {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  return v === '1' || v === 'true';
+};
+const anticheat = new AnticheatMgr({
+  snapDegrees: anticheatEnvNum('PVP_ANTICHEAT_SNAP_DEGREES', ANTICHEAT_AIM_SNAP_DEGREES),
+  kickScore: anticheatEnvNum('PVP_ANTICHEAT_KICK_SCORE', ANTICHEAT_KICK_SCORE),
+  lockTicks: anticheatEnvNum('PVP_ANTICHEAT_LOCK_TICKS', ANTICHEAT_LOCK_TICKS),
+  lockMinMove: anticheatEnvNum('PVP_ANTICHEAT_LOCK_MIN_MOVE', ANTICHEAT_LOCK_MIN_MOVE),
+  lockRequireMove: anticheatEnvFlag('PVP_ANTICHEAT_LOCK_REQUIRE_MOVE', ANTICHEAT_LOCK_REQUIRE_MOVE),
+  lockHyStddev: anticheatEnvNum('PVP_ANTICHEAT_LOCK_HY_STDDEV', ANTICHEAT_LOCK_HY_STDDEV),
+  lockEnabled: anticheatEnvFlag('PVP_ANTICHEAT_LOCK_ENABLED', ANTICHEAT_LOCK_ENABLED),
+  lagReversalsNeeded: anticheatEnvNum('PVP_ANTICHEAT_LAG_REVERSALS_NEEDED', ANTICHEAT_LAG_REVERSALS_NEEDED),
+  lagZeroMax: anticheatEnvNum('PVP_ANTICHEAT_LAG_ZERO_MAX', ANTICHEAT_LAG_ZERO_MAX),
+  lagMinStep: anticheatEnvNum('PVP_ANTICHEAT_LAG_MIN_STEP', ANTICHEAT_LAG_MIN_STEP),
+  lagMaxDelay: anticheatEnvNum('PVP_ANTICHEAT_LAG_MAX_DELAY', ANTICHEAT_LAG_MAX_DELAY),
+});
+// Server-side moving-target dummy for anti-cheat testing. When enabled, each
+// room spawns an indestructible enemy that circles a spawn point so a lone
+// developer can exercise the moving-target lock rule without a second client.
+const DUMMY_ENABLED = process.env.PVP_TEST_DUMMY === '1';
 const STRIKE_RADIUS = 32;
 const PASSWORD = "761234";
 const SERVER_SETTINGS = Object.freeze({
@@ -936,6 +1012,82 @@ function neutralInput(weapon = 'rifle') {
   };
 }
 
+// ---- Test-only moving-target dummy -----------------------------------------
+// A fake websocket so the dummy can live in room.players (snapshots, broadcasts,
+// damage events) without a real client on the other end.
+function makeFakeWs() {
+  return { readyState: WebSocket.OPEN, send() {}, pvpRosterVersion: 0 };
+}
+
+function spawnTestDummy(room) {
+  // Opposite team of the first real player, so the dummy is always an enemy.
+  let realTeam = null;
+  for (const p of room.players.values()) {
+    if (!p.isTestDummy) { realTeam = p.team; break; }
+  }
+  if (!realTeam) return null;
+  const team = realTeam === 'blue' ? 'red' : 'blue';
+  const dummy = makePlayer(
+    makeFakeWs(),
+    room,
+    'TARGET_DUMMY',
+    `dummy-${randomUUID().slice(0, 8)}`,
+    {}
+  );
+  if (!dummy) return null;
+  dummy.isTestDummy = true;
+  dummy.team = team;
+  dummy.actor.team = team;
+  dummy.actor.alive = true;
+  dummy.actor.maxHealth = 999999;
+  dummy.actor.health = 999999;
+  dummy.actor.armor = 0;
+  dummy.hasDeployed = true;
+  const center = pickServerSpawn(room.level, team, room.players.values());
+  dummy.dummyCenterX = center.x;
+  dummy.dummyCenterZ = center.z;
+  dummy.dummyDir = 1;              // +1/-1 strafe direction
+  dummy.dummyPhase = 0;            // seconds until the next direction reversal
+  dummy.actor.position.set(center.x, center.y, center.z);
+  dummy.lastInputAt = Date.now();
+  room.players.set(dummy.id, dummy);
+  room.testDummy = dummy;
+  return dummy;
+}
+
+function tickTestDummy(dummy, now) {
+  const a = dummy.actor;
+  // Strafe back and forth along X with hard direction reversals every ~0.6 s, so
+  // the target's angular position as seen from the shooter changes direction
+  // frequently. This is what exposes the zero-lag (silent aim) vs reaction-lag
+  // (human) signature for the lag rule.
+  const limX = dummy.room.level.bounds.x - 2;
+  dummy.dummyPhase += TICK_DT;
+  if (dummy.dummyPhase >= 0.6) {
+    dummy.dummyPhase = 0;
+    dummy.dummyDir *= -1;
+  }
+  const speed = 4; // m/s
+  let nx = a.position.x + dummy.dummyDir * speed * TICK_DT;
+  if (nx > limX || nx < -limX) {
+    nx = clamp(nx, -limX, limX);
+    dummy.dummyDir *= -1;
+  }
+  const ox = a.position.x;
+  a.position.x = nx;
+  a.velocity.x = (nx - ox) / TICK_DT;
+  a.velocity.z = 0;
+  // Indestructible: re-deploy instantly if a round reset or a stray shot drops it.
+  if (!a.alive || a.health <= 0) {
+    a.alive = true;
+    a.health = 999999;
+    a.armor = 0;
+    a.deathAnim = null;
+  }
+  dummy.hasDeployed = true;
+  dummy.lastInputAt = now;
+}
+
 function joinRoom(ws, message) {
   if (message.protocol !== PVP_PROTOCOL) {
     send(ws, {
@@ -1019,10 +1171,11 @@ function joinRoom(ws, message) {
   broadcastRooms();
 }
 
-function leaveRoom(ws, kind = 'leave') {
+function leaveRoom(ws, kind = 'leave', announcement = null) {
   const player = ws.pvpPlayer;
   if (!player) return;
   const room = player.room;
+  anticheat.reset(player.clientKey);
   room.players.delete(player.id);
   if (room.mapVote?.votes.delete(player.id)) broadcastMapVoteUpdate(room);
   room.rosterVersion = (room.rosterVersion + 1) >>> 0;
@@ -1046,13 +1199,37 @@ function leaveRoom(ws, kind = 'leave') {
     type: 'chat',
     system: true,
     kind,
-    text: kind === 'kicked'
+    text: announcement ?? (kind === 'kicked'
       ? `${player.name} WAS KICKED`
-      : `${player.name} LEFT`,
+      : `${player.name} LEFT`),
     serverTime: Date.now(),
   });
   evaluateVoteKick(room, Date.now());
   broadcastRooms();
+}
+
+/**
+ * Reusable removal used by every server-side kick (vote kick, anti-cheat and
+ * any future rule). Sends the private kicked notice to the socket, announces
+ * the removal on the room's public feed, then detaches and closes the
+ * connection. `announcement` is the public-feed text; it defaults to the
+ * shared "⚠ NAME 环境异常 被移出对局" notice when omitted.
+ */
+function kickPlayer(player, {
+  reason = 'KICKED',
+  code = 4003,
+  message = 'YOU HAVE BEEN REMOVED FROM THE MATCH',
+  announcement = null,
+} = {}) {
+  send(player.ws, {
+    type: 'kicked',
+    reason,
+    message,
+    banUntil: 0,
+  });
+  leaveRoom(player.ws, 'kicked', announcement ?? `⚠ ${player.name} 环境异常 被移出对局`);
+  const closeTimer = setTimeout(() => player.ws.close(code, reason), 25);
+  closeTimer.unref?.();
 }
 
 function handleChat(player, value, now) {
@@ -1281,6 +1458,57 @@ function finishVoteKick(room, passed, reason, now) {
   }
 }
 
+// Scratch vectors for the anti-cheat aim-error lookup (module scope so the
+// 45 Hz input loop does not churn per-call allocations).
+const _acEye = new THREE.Vector3();
+const _acAim = new THREE.Vector3();
+
+// Aim measurement to the nearest living, damageable enemy. `onTarget` is true
+// when the reported aim ray intersects a body (raycast, world occlusion ignored
+// — this measures *where the aim points*, not whether a shot would connect);
+// `target` is the enemy the ray hits (or the nearest by chest angle when the
+// aim misses everyone); `errorDeg` is 0 when on a body, else the angle to the
+// nearest enemy's chest centre. Returns null when no enemy is within range.
+function aimErrorTo(player, yaw, pitch) {
+  const origin = player.actor.eyePosition(_acEye);
+  aimDirection(yaw, pitch, _acAim);
+  let hitTarget = null;   // first enemy whose body the aim ray intersects
+  let hitInfo = null;     // rayPlayer hit ({ point, part }) for that enemy
+  let nearTarget = null;  // nearest enemy by chest angle (fallback)
+  let nearErr = Infinity;
+  for (const target of player.room.players.values()) {
+    if (target === player || !target.actor.alive || !canDamagePvpTarget(player, target)) continue;
+    const dx = target.actor.position.x - origin.x;
+    const dy = target.actor.position.y - origin.y;
+    const dz = target.actor.position.z - origin.z;
+    const distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq > 500 * 500) continue;
+    const hit = rayPlayer(target, origin, _acAim, Math.sqrt(distSq) + 3);
+    if (!hitTarget && hit) { hitTarget = target; hitInfo = hit; }
+    const cx = target.actor.position.x - origin.x;
+    const cy = target.actor.position.y + 1.1 - origin.y;
+    const cz = target.actor.position.z - origin.z;
+    const cdist = Math.hypot(cx, cy, cz);
+    const dot = (cx * _acAim.x + cy * _acAim.y + cz * _acAim.z) / cdist;
+    const err = Math.acos(clamp(dot, -1, 1)) * 180 / Math.PI;
+    if (err < nearErr) { nearErr = err; nearTarget = target; }
+  }
+  if (!hitTarget && !nearTarget) return null;
+  return {
+    onTarget: hitTarget != null,
+    target: hitTarget || nearTarget,
+    // Continuous chest-centre offset, even when on-target — headshots read a
+    // few degrees off the chest reference. This is the signal to log (and later
+    // variance-analyse) to separate silent aim's constant offset from a human's
+    // wandering one.
+    errorDeg: nearErr,
+    // Body-local aim point (where on the target the ray lands), distance
+    // independent: silent aim pins this, a human's hand wanders it.
+    hitHeight: hitInfo ? hitInfo.point.y - hitTarget.actor.position.y : null,
+    hitPart: hitInfo ? hitInfo.part : null,
+  };
+}
+
 function handleInput(player, message) {
   const seq = Number(message.seq);
   if (!Number.isSafeInteger(seq) || seq <= player.lastSeq || seq - player.lastSeq > 10000) return;
@@ -1359,13 +1587,91 @@ function handleInput(player, message) {
     && playerAllowsWeapon(player, message.weapon)) {
     player.meleeQueued = true;
   }
-  player.input.yaw = wrapAngle(finiteClamp(message.yaw, -Math.PI * 4, Math.PI * 4, player.actor.yaw));
-  player.input.pitch = finiteClamp(
+  const yaw = wrapAngle(finiteClamp(message.yaw, -Math.PI * 4, Math.PI * 4, player.actor.yaw));
+  const pitch = finiteClamp(
     message.pitch,
     -Math.PI / 2 + 0.02,
     Math.PI / 2 - 0.02,
     player.actor.pitch
   );
+  // Anti-cheat instrumentation (unified via AnticheatMgr). Two rules feed one
+  // per-client score; crossing the threshold removes the player through the
+  // reusable kick path.
+  //   1. Aim snap — the aim error collapses onto a body within a single tick
+  //      (instant re-acquisition), or the aim angle jumps >60° onto a body.
+  //   2. Aim lock — the aim error stays below a hair-thin threshold on the same
+  //      enemy for many consecutive firing ticks (silent-aim packet rewrite).
+  if (player.hasDeployed && player.actor.alive) {
+    const firing = message.trigger === true;
+    const snapDelta = anticheat.feedAim(player.clientKey, yaw, pitch, firing);
+    const aim = firing ? aimErrorTo(player, yaw, pitch) : null;
+    const errorDeg = aim ? aim.errorDeg : Infinity;
+    const target = aim ? aim.target : null;
+    const lockTarget = target && {
+      id: target.id,
+      x: target.actor.position.x,
+      y: target.actor.position.y,
+      z: target.actor.position.z,
+    };
+    const report = anticheat.feedError(
+      player.clientKey,
+      snapDelta,
+      errorDeg,
+      aim ? aim.onTarget : false,
+      lockTarget,
+      firing,
+      aim ? aim.hitHeight : null
+    );
+    let lagFlag = 0;
+    if (target) {
+      // Target's per-tick angular step relative to the shooter, from the relative
+      // velocity — so the shooter's own strafing never reads as target motion.
+      const relX = target.actor.velocity.x - player.actor.velocity.x;
+      const relZ = target.actor.velocity.z - player.actor.velocity.z;
+      const losX = target.actor.position.x - player.actor.position.x;
+      const losZ = target.actor.position.z - player.actor.position.z;
+      const dist2 = losX * losX + losZ * losZ;
+      const targetStep = dist2 > 1e-6
+        ? ((relX * losZ - relZ * losX) / dist2) * TICK_DT
+        : 0;
+      lagFlag = anticheat.feedLag(player.clientKey, yaw, targetStep, firing);
+    } else {
+      anticheat.feedLag(player.clientKey, yaw, 0, false);
+    }
+    if (ANTICHEAT_DEBUG) {
+      const eye = player.actor.eyePosition(new THREE.Vector3());
+      acLog(player, JSON.stringify({
+        yaw: Number(yaw.toFixed(4)),
+        pitch: Number(pitch.toFixed(4)),
+        err: Number.isFinite(errorDeg) ? Number(errorDeg.toFixed(3)) : null,
+        lnErr: Number.isFinite(errorDeg) ? Number(Math.log(errorDeg + 1e-3).toFixed(3)) : null,
+        snap: Number(snapDelta.toFixed(2)),
+        on: aim ? (aim.onTarget ? 1 : 0) : 0,
+        target: target ? target.id.slice(0, 8) : null,
+        tx: target ? Number(target.actor.position.x.toFixed(2)) : null,
+        ty: target ? Number(target.actor.position.y.toFixed(2)) : null,
+        tz: target ? Number(target.actor.position.z.toFixed(2)) : null,
+        hy: aim ? (aim.hitHeight != null ? Number(aim.hitHeight.toFixed(3)) : null) : null,
+        hpart: aim ? aim.hitPart : null,
+        ex: Number(eye.x.toFixed(2)),
+        ey: Number(eye.y.toFixed(2)),
+        ez: Number(eye.z.toFixed(2)),
+        snapFlag: report.snap,
+        lockFlag: report.lock,
+        lagFlag,
+        score: anticheat.scoreOf(player.clientKey),
+      }));
+    }
+    if ((report.snap || report.lock || lagFlag) && anticheat.shouldKick(player.clientKey)) {
+      kickPlayer(player, {
+        reason: 'ANTICHEAT',
+        message: 'ENVIRONMENT ANOMALY - REMOVED FROM MATCH',
+      });
+      return;
+    }
+  }
+  player.input.yaw = yaw;
+  player.input.pitch = pitch;
   if (playerAllowsWeapon(player, message.weapon)) player.input.weapon = message.weapon;
   if (message.slide === true) player.slideQueued = true;
   if (message.reload === true) player.reloadQueued = true;
@@ -1760,6 +2066,10 @@ function tickRoom(room, now) {
 
   for (const player of room.players.values()) {
     tickPlayer(room, player, now);
+  }
+  if (DUMMY_ENABLED) {
+    if (!room.testDummy) spawnTestDummy(room);
+    if (room.testDummy) tickTestDummy(room.testDummy, now);
   }
   processJuggernautAirdrops(room, now);
   processGrenades(room, now);
@@ -3108,6 +3418,9 @@ function checkRound(room) {
 function respawnPlayer(room, player, now = Date.now()) {
   endLaserCannon(player, { restoreWeapon: false });
   player.damageContributors.clear();
+  // A respawn reorients the view; drop the aim-snap baseline so the new spawn
+  // heading is never mistaken for a cheated snap.
+  anticheat.resetAim(player.clientKey);
   player.actor.level = room.level;
   player.actor.respawn(pickServerSpawn(room.level, player.team, room.players.values()));
   player.actor.team = player.team;
