@@ -93,52 +93,19 @@ server.listen(PORT, HOST, () => {
   console.log('  press Ctrl+C to stop');
   console.log('');
   
-  let input = '';
-  
-  readline.emitKeypressEvents(process.stdin);
-  process.stdin.setRawMode(true);
-  
-  const renderPrompt = () => {
-    process.stdout.write('> ');
-  };
-  
-  const clearLine = () => {
-    readline.cursorTo(process.stdout, 0);
-    readline.clearLine(process.stdout, 0);
-  };
-  
-  process.stdin.on('keypress', (str, key) => {
-    if (key.ctrl && key.name === 'c') {
-      console.log('\n');
-      process.exit();
-      return;
-    }
-    
-    if (key.name === 'return') {
-      clearLine();
-      const cmd = input.trim();
-      input = '';
-      if (cmd) {
-        onCommand(cmd);
-      }
-      renderPrompt();
-      return;
-    }
-    
-    if (key.name === 'backspace') {
-      if (input.length > 0) {
-        input = input.slice(0, -1);
-        clearLine();
-        process.stdout.write('> ' + input);
-      }
-      return;
-    }
-    
-    if (str && str.length === 1 && str.charCodeAt(0) >= 32 && !key.ctrl && !key.meta) {
-      input += str;
-      process.stdout.write(str);
-    }
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: ''
   });
   
-  renderPrompt();
+  rl.prompt();
+  
+  rl.on('line', (input) => {
+    const trimmed = input.trim();
+    if (trimmed) {
+      onCommand(trimmed);
+    }
+    rl.prompt();
+  });
 });
